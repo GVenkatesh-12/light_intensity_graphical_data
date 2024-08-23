@@ -20,15 +20,24 @@
             margin: 20px auto;
             border: 1px solid #444;
         }
+        select {
+            font-size: 16px;
+            padding: 10px;
+            margin: 20px;
+            border: 1px solid #444;
+            background-color: #333;
+            color: #fff;
+        }
     </style>
 </head>
 <body>
     <h1>Light Intensity Graph</h1>
+    <select id="dateDropdown"></select>
     <canvas id="lightIntensityChart"></canvas>
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-        import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+        import { getDatabase, ref, onValue, get } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyAKHoUEMTLlGJ544kfe5dFyEvIg5NPsz0E",
@@ -43,19 +52,31 @@
         const app = initializeApp(firebaseConfig);
         const database = getDatabase(app);
         const dataRef = ref(database, 'SolarData/');
+        const dateDropdown = document.getElementById('dateDropdown');
+        const ctx = document.getElementById('lightIntensityChart').getContext('2d');
 
         function formatTimestamp(timestamp) {
-            return new Date(timestamp * 1000).toLocaleString();
+            const date = new Date(timestamp * 1000);
+            return `${date.getDate().toString().padStart(2, '0')}/${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getFullYear()}`;
         }
 
-        const ctx = document.getElementById('lightIntensityChart').getContext('2d');
+        function formatTime(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+        }
+
+        function getDayKey(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`;
+        }
+
         let chart = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: [],
+                labels: Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, '0')}:00`),
                 datasets: [{
                     label: 'Light Intensity (lx)',
-                    data: [],
+                    data: Array(24).fill(null),
                     borderColor: 'rgb(75, 192, 192)',
                     backgroundColor: 'rgba(75, 192, 192, 0.2)',
                     fill: true
@@ -66,7 +87,11 @@
                     x: {
                         title: {
                             display: true,
-                            text: 'Timestamp'
+                            text: 'Hour of Day'
+                        },
+                        ticks: {
+                            autoSkip: true,
+                            maxTicksLimit: 24
                         }
                     },
                     y: {
@@ -79,32 +104,89 @@
             }
         });
 
-        onValue(dataRef, (snapshot) => {
-            const data = snapshot.val();
-            const labels = [];
-            const values = [];
+        function updateChart(data) {
+            const labels = Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, '0')}:00`);
+            const values = Array(24).fill(null);
 
             if (data) {
                 for (const timestamp in data) {
                     if (data.hasOwnProperty(timestamp)) {
                         const entry = data[timestamp];
                         if (entry && entry.lightIntensity && entry.timestamp) {
-                            labels.push(formatTimestamp(entry.timestamp));
-                            values.push(entry.lightIntensity);
+                            const entryHour = new Date(entry.timestamp * 1000).getHours();
+                            values[entryHour] = entry.lightIntensity;
                         }
                     }
                 }
-
-                // Update chart
-                chart.data.labels = labels;
-                chart.data.datasets[0].data = values;
-                chart.update();
-            } else {
-                console.log('No data found.');
             }
-        }, {
-            onlyOnce: false
+
+            chart.data.labels = labels;
+            chart.data.datasets[0].data = values;
+            chart.update();
+        }
+
+        function populateDateDropdown(dates) {
+            dateDropdown.innerHTML = '';
+            dates.forEach(date => {
+                const option = document.createElement('option');
+                option.value = date;
+                option.textContent = date;
+                dateDropdown.appendChild(option);
+            });
+        }
+
+        async function fetchAvailableDates() {
+            try {
+                const snapshot = await get(dataRef);
+                const data = snapshot.val();
+                if (data) {
+                    const dates = new Set();
+                    for (const timestamp in data) {
+                        if (data.hasOwnProperty(timestamp)) {
+                            const entry = data[timestamp];
+                            if (entry && entry.timestamp) {
+                                const dateKey = getDayKey(entry.timestamp);
+                                dates.add(dateKey);
+                            }
+                        }
+                    }
+                    populateDateDropdown(Array.from(dates).map(dateKey => {
+                        const parts = dateKey.split('-');
+                        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+                    }));
+                }
+            } catch (error) {
+                console.error('Error fetching available dates:', error);
+            }
+        }
+
+        async function fetchDataForDate(date) {
+            const formattedDate = date.split('/').reverse().join('-');
+            const startOfDay = new Date(formattedDate).setHours(0, 0, 0, 0) / 1000;
+            const endOfDay = new Date(formattedDate).setHours(23, 59, 59, 999) / 1000;
+            const filteredDataRef = ref(database, 'SolarData/');
+
+            onValue(filteredDataRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    const filteredData = {};
+                    for (const timestamp in data) {
+                        if (data.hasOwnProperty(timestamp)) {
+                            if (timestamp >= startOfDay && timestamp <= endOfDay) {
+                                filteredData[timestamp] = data[timestamp];
+                            }
+                        }
+                    }
+                    updateChart(filteredData);
+                }
+            });
+        }
+
+        dateDropdown.addEventListener('change', (event) => {
+            fetchDataForDate(event.target.value);
         });
+
+        fetchAvailableDates();
     </script>
 </body>
 </html>
