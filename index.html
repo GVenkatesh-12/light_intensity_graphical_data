@@ -7,6 +7,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@0.5.7/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -28,12 +29,22 @@
             background-color: #333;
             color: #fff;
         }
+        .tooltip {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            padding: 5px;
+            border-radius: 3px;
+            pointer-events: none;
+            display: none;
+        }
     </style>
 </head>
 <body>
     <h1>Light Intensity Graph</h1>
     <select id="dateDropdown"></select>
     <canvas id="lightIntensityChart"></canvas>
+    <div class="tooltip" id="tooltip"></div>
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
@@ -54,6 +65,7 @@
         const dataRef = ref(database, 'SolarData/');
         const dateDropdown = document.getElementById('dateDropdown');
         const ctx = document.getElementById('lightIntensityChart').getContext('2d');
+        const tooltip = document.getElementById('tooltip');
 
         function formatTimestamp(timestamp) {
             const date = new Date(timestamp * 1000);
@@ -73,13 +85,20 @@
         let chart = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, '0')}:00`),
+                labels: Array.from({ length: 288 }, (_, i) => {
+                    const hour = Math.floor(i / 12);
+                    const minute = (i % 12) * 5;
+                    return `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+                }),
                 datasets: [{
                     label: 'Light Intensity (lx)',
-                    data: Array(24).fill(null),
-                    borderColor: 'rgb(75, 192, 192)',
-                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                    fill: true
+                    data: Array(288).fill(null),
+                    borderColor: 'rgb(0, 255, 0)', // Green border
+                    backgroundColor: 'rgba(0, 255, 0, 0.2)', // Light green fill
+                    fill: true,
+                    tension: 0.4, // Smooth curve
+                    pointRadius: 0, // No nodes
+                    borderWidth: 2
                 }]
             },
             options: {
@@ -87,7 +106,7 @@
                     x: {
                         title: {
                             display: true,
-                            text: 'Hour of Day'
+                            text: 'Time of Day'
                         },
                         ticks: {
                             autoSkip: true,
@@ -100,29 +119,66 @@
                             text: 'Light Intensity (lx)'
                         }
                     }
+                },
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: function(tooltipItem) {
+                                return `Time: ${tooltipItem.label}, Intensity: ${tooltipItem.raw} lx`;
+                            }
+                        }
+                    },
+                    annotation: {
+                        annotations: {
+                            line: {
+                                type: 'line',
+                                borderColor: 'rgba(0, 255, 0, 0.5)', // Green line
+                                borderWidth: 1,
+                                borderDash: [2, 2],
+                                label: {
+                                    enabled: false
+                                },
+                                scaleID: 'x',
+                                value: null
+                            }
+                        }
+                    }
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'nearest' // Show tooltip for nearest data point
                 }
             }
         });
 
         function updateChart(data) {
-            const labels = Array.from({ length: 24 }, (_, i) => `${i.toString().padStart(2, '0')}:00`);
-            const values = Array(24).fill(null);
+            const values = Array(288).fill(0);
+            const counts = Array(288).fill(0);
 
             if (data) {
                 for (const timestamp in data) {
                     if (data.hasOwnProperty(timestamp)) {
                         const entry = data[timestamp];
                         if (entry && entry.lightIntensity && entry.timestamp) {
-                            const entryHour = new Date(entry.timestamp * 1000).getHours();
-                            values[entryHour] = entry.lightIntensity;
+                            const entryDate = new Date(entry.timestamp * 1000);
+                            const entryMinute = Math.floor(entryDate.getHours() * 12 + entryDate.getMinutes() / 5);
+                            values[entryMinute] += entry.lightIntensity;
+                            counts[entryMinute] += 1;
                         }
+                    }
+                }
+
+                for (let i = 0; i < values.length; i++) {
+                    if (counts[i] > 0) {
+                        values[i] /= counts[i];
+                    } else {
+                        values[i] = null;
                     }
                 }
             }
 
-            chart.data.labels = labels;
             chart.data.datasets[0].data = values;
-            chart.update();
+            chart.update('none'); // Avoid animation during update to prevent flickering
         }
 
         function populateDateDropdown(dates) {
@@ -150,10 +206,18 @@
                             }
                         }
                     }
-                    populateDateDropdown(Array.from(dates).map(dateKey => {
+                    const sortedDates = Array.from(dates).map(dateKey => {
                         const parts = dateKey.split('-');
                         return `${parts[2]}/${parts[1]}/${parts[0]}`;
-                    }));
+                    }).sort((a, b) => new Date(b) - new Date(a));
+                    
+                    populateDateDropdown(sortedDates);
+                    
+                    // Set the default date to today and fetch data
+                    const today = new Date();
+                    const todayFormatted = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
+                    dateDropdown.value = todayFormatted;
+                    fetchDataForDate(todayFormatted);
                 }
             } catch (error) {
                 console.error('Error fetching available dates:', error);
@@ -172,8 +236,9 @@
                     const filteredData = {};
                     for (const timestamp in data) {
                         if (data.hasOwnProperty(timestamp)) {
-                            if (timestamp >= startOfDay && timestamp <= endOfDay) {
-                                filteredData[timestamp] = data[timestamp];
+                            const entry = data[timestamp];
+                            if (entry && entry.timestamp >= startOfDay && entry.timestamp <= endOfDay) {
+                                filteredData[timestamp] = entry;
                             }
                         }
                     }
